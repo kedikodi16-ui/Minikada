@@ -21,10 +21,17 @@ jobs:
           df -h /
       - name: Swap ac
         run: |
+          df -h / /mnt
           sudo swapoff -a || true
-          sudo fallocate -l 24G /swapfile
-          sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+          MNT_FREE=$(df --output=avail -BG /mnt | tail -1 | tr -dc 0-9)
+          S1=$((MNT_FREE - 1))
+          sudo fallocate -l ${S1}G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile && sudo mkswap /mnt/swapfile && sudo swapon /mnt/swapfile
+          sudo fallocate -l 8G /swapfile2
+          sudo chmod 600 /swapfile2 && sudo mkswap /swapfile2 && sudo swapon /swapfile2
+          sudo sysctl vm.swappiness=60 vm.overcommit_memory=1
           free -g
+          df -h / /mnt
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -40,7 +47,7 @@ jobs:
       - name: Donustur
         run: |
           mkdir -p out
-          run() { rm -rf out/*; litert-torch export_hf --model=model --output_dir=out "$@" --quantization_recipe=${{ inputs.recipe }} --cache_length=4096 --bundle_litert_lm=True; }
+          run() { rm -rf out/*; nice -n 10 litert-torch export_hf --model=model --output_dir=out "$@" --quantization_recipe=${{ inputs.recipe }} --cache_length=4096 --bundle_litert_lm=True; }
           found() { find out -name '*.litertlm' | head -1; }
           run --use_v2=True --delete_in_memory_params=True || true
           [ -n "$(found)" ] || { echo ">>> bf16"; run --model_dtype=bfloat16 || true; }
