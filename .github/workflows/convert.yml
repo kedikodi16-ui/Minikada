@@ -1,0 +1,62 @@
+name: Gemma4 anlord INT4 donustur
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Hugging Face model"
+        default: "anlord/gemma-4-E2B-it-abliterated"
+      recipe:
+        description: "dynamic_wi4_afp32 (INT4) veya dynamic_wi8_afp32 (INT8)"
+        default: "dynamic_wi4_afp32"
+permissions:
+  contents: write
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Disk ac
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+      - name: Swap ac
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 24G /swapfile
+          sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+          free -g
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Paketleri kur
+        run: pip install -q "litert-torch==0.10.0" litert-lm "huggingface_hub[cli]"
+      - name: Modeli indir
+        run: |
+          python - <<PY
+          from huggingface_hub import snapshot_download
+          snapshot_download("${{ inputs.model }}", local_dir="model")
+          PY
+          df -h /
+      - name: Donustur
+        run: |
+          mkdir -p out
+          run() { rm -rf out/*; litert-torch export_hf --model=model --output_dir=out "$@" --quantization_recipe=${{ inputs.recipe }} --cache_length=4096 --bundle_litert_lm=True; }
+          found() { find out -name '*.litertlm' | head -1; }
+          run --use_v2=True --delete_in_memory_params=True || true
+          [ -n "$(found)" ] || { echo ">>> bf16"; run --model_dtype=bfloat16 || true; }
+          [ -n "$(found)" ] || { echo ">>> standart"; run || true; }
+          [ -n "$(found)" ] || { echo ">>> gorsel"; run --task=image_text_to_text || true; }
+          F=$(found); [ -n "$F" ] || { echo "HATA: .litertlm uretilemedi"; exit 1; }
+          cp "$F" gemma4-anlord.litertlm
+          ls -l gemma4-anlord.litertlm
+      - name: Kisa test
+        run: litert-lm run gemma4-anlord.litertlm --prompt "Turkiye'nin baskenti neresidir? Tek cumleyle cevapla." 2>&1 | tail -5
+      - name: Parcala
+        run: |
+          split -b 1900M -d gemma4-anlord.litertlm gemma4-anlord.litertlm.part
+          ls -l gemma4-anlord.litertlm.part*
+      - name: Release yukle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "model-${{ github.run_number }}" gemma4-anlord.litertlm.part* --repo "${{ github.repository }}" --title "Gemma4 anlord ${{ inputs.recipe }}" --notes "Birlestirmek icin: cat gemma4-anlord.litertlm.part* > gemma4-anlord.litertlm"
