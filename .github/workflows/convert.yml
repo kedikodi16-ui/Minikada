@@ -29,7 +29,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Paketleri kur
-        run: pip install -q "litert-torch==0.10.0" litert-lm "huggingface_hub[cli]"
+        run: pip install -q "litert-torch==0.10.0" litert-lm tensorflow-cpu "huggingface_hub[cli]"
       - name: Modeli indir
         run: |
           python - <<PY
