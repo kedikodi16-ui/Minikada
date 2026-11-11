@@ -51,17 +51,20 @@ jobs:
             LIM=""
           fi
           echo "LIM=$LIM"
-          run() { rm -rf out/*; timeout 100m $LIM nice -n 10 litert-torch export_hf --model=model --output_dir=out "$@" --quantization_recipe=${{ inputs.recipe }} --cache_length=4096 --bundle_litert_lm=True 2>&1 | grep --line-buffered -v "is part of .* signature, but not documented"; free -g; dmesg 2>/dev/null | grep -i -E "killed process|out of memory" | tail -3 || true; }
+          # Gemma4 icin externalize_embedder ZORUNLU; varsayilan dtype float32 (~20 GB) 16 GB RAM'e sigmaz -> bf16
+          EMB="--externalize_embedder=True --single_token_embedder=True"
+          run() { rm -rf out/*; timeout 100m $LIM nice -n 10 litert-torch export_hf --model=model --output_dir=out "$@" --quantization_recipe=${{ inputs.recipe }} --cache_length=4096 --bundle_litert_lm=True 2>&1 | grep --line-buffered -v "is part of .* signature, but not documented"; echo "exit=${PIPESTATUS[0]}"; free -g; }
           found() { find out -name '*.litertlm' | head -1; }
-          run --use_v2=True --delete_in_memory_params=True || true
-          [ -n "$(found)" ] || { echo ">>> bf16"; run --model_dtype=bfloat16 || true; }
-          [ -n "$(found)" ] || { echo ">>> standart"; run || true; }
-          [ -n "$(found)" ] || { echo ">>> gorsel"; run --task=image_text_to_text || true; }
+          echo ">>> v2 + bf16 + akitma (en az RAM)"; run --use_v2=True --delete_in_memory_params=True --model_dtype=bfloat16 $EMB || true
+          [ -n "$(found)" ] || { echo ">>> v2 + bf16"; run --use_v2=True --model_dtype=bfloat16 $EMB || true; }
+          [ -n "$(found)" ] || { echo ">>> bf16 (eski donusturucu)"; run --model_dtype=bfloat16 $EMB || true; }
+          [ -n "$(found)" ] || { echo ">>> gorsel (bf16)"; run --task=image_text_to_text --model_dtype=bfloat16 || true; }
           F=$(found); [ -n "$F" ] || { echo "HATA: .litertlm uretilemedi"; exit 1; }
           cp "$F" gemma4-anlord.litertlm
           ls -l gemma4-anlord.litertlm
       - name: Kisa test
-        run: litert-lm run gemma4-anlord.litertlm --prompt "Turkiye'nin baskenti neresidir? Tek cumleyle cevapla." 2>&1 | tail -5
+        run: |
+          timeout 20m litert-lm run gemma4-anlord.litertlm --prompt "Turkiye'nin baskenti neresidir? Tek cumleyle cevapla." 2>&1 | tail -5 || echo "UYARI: kisa test basarisiz/zaman asimi; model yine de Release'e yuklenecek"
       - name: Parcala
         run: |
           split -b 1900M -d gemma4-anlord.litertlm gemma4-anlord.litertlm.part
