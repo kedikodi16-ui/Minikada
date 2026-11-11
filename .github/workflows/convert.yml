@@ -1,5 +1,7 @@
 name: Gemma4 anlord INT4 donustur
 on:
+  push:
+    paths: [".github/workflows/convert.yml"]
   workflow_dispatch:
     inputs:
       model:
@@ -19,47 +21,44 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           df -h /
-      - name: Swap ac
+      - name: Swap ac (32 GB)
         run: |
-          df -h / /mnt
           sudo swapoff -a || true
-          sudo fallocate -l 12G /mnt/swapfile
-          sudo chmod 600 /mnt/swapfile && sudo mkswap /mnt/swapfile && sudo swapon /mnt/swapfile
-          sudo fallocate -l 8G /swapfile2
-          sudo chmod 600 /swapfile2 && sudo mkswap /swapfile2 && sudo swapon /swapfile2
+          sudo rm -f /mnt/swapfile /swapfile /swapfile2
+          sudo fallocate -l 32G /swapfile
+          sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
           free -g
-          df -h / /mnt
+          df -h /
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # Surumler yerelde kucuk bir Gemma4 ile test edildi:
+      # - V2 donusturucu tf-nightly ister (convert_mlir_bytecode)
+      # - litert-lm-builder 0.19 TfLiteModelType'i kaldirdi -> 0.18.1'e sabitle
       - name: Paketleri kur
-        run: pip install -q "litert-torch==0.10.0" litert-lm tf-nightly "huggingface_hub[cli]"
+        run: |
+          pip install -q "litert-torch==0.10.0" "tf-nightly==2.23.0.dev20261109" "litert-lm-builder==0.18.1" "litert-lm==0.18.1" "huggingface_hub[cli]"
+          pip list 2>/dev/null | grep -iE "litert|tf-nightly|^torch "
       - name: Modeli indir
         run: |
           python - <<PY
           from huggingface_hub import snapshot_download
-          snapshot_download("${{ inputs.model }}", local_dir="model")
+          snapshot_download("${{ inputs.model || 'anlord/gemma-4-E2B-it-abliterated' }}", local_dir="model")
           PY
           df -h /
       - name: Donustur
         run: |
           mkdir -p out
-          # Bellek siniri: asilirsa runner degil sadece donusum sureci olur
-          if sudo systemd-run --scope -q -p MemoryMax=13G -p MemorySwapMax=18G --uid=$(id -u) --gid=$(id -g) true 2>/dev/null; then
-            LIM="sudo systemd-run --scope -q -p MemoryMax=13G -p MemorySwapMax=18G --uid=$(id -u) --gid=$(id -g) --setenv=PATH=$PATH --setenv=HOME=$HOME --working-directory=$PWD"
-          else
-            LIM=""
-          fi
+          # Bellek siniri: asilirsa runner degil sadece donusum sureci olur (swap kullanabilir)
+          LIM="sudo systemd-run --scope -q -p MemoryMax=14G -p MemorySwapMax=32G --uid=$(id -u) --gid=$(id -g) --setenv=PATH=$PATH --setenv=HOME=$HOME --working-directory=$PWD"
+          $LIM true 2>/dev/null || LIM=""
           echo "LIM=$LIM"
-          # Gemma4 icin externalize_embedder ZORUNLU; varsayilan dtype float32 (~20 GB) 16 GB RAM'e sigmaz -> bf16
+          # Gemma4 icin externalize_embedder ZORUNLU. bf16 KULLANMA (V2'de dtype hatasi, eskisinde desteklenmiyor).
           EMB="--externalize_embedder=True --single_token_embedder=True"
-          run() { rm -rf out/*; timeout 70m $LIM nice -n 10 litert-torch export_hf --model=model --output_dir=out "$@" --quantization_recipe=${{ inputs.recipe }} --cache_length=4096 --bundle_litert_lm=True 2>&1 | grep --line-buffered -v "is part of .* signature, but not documented"; echo "exit=${PIPESTATUS[0]}"; free -g; }
+          run() { T=$1; shift; rm -rf out/*; timeout ${T}m $LIM nice -n 10 litert-torch export_hf --model=model --output_dir=out "$@" --quantization_recipe=${{ inputs.recipe || 'dynamic_wi4_afp32' }} --cache_length=4096 --bundle_litert_lm=True 2>&1 | grep --line-buffered -vE "is part of .* signature, but not documented|^\s*$"; echo "exit=${PIPESTATUS[0]}"; free -g; df -h / | tail -1; }
           found() { find out -name '*.litertlm' | head -1; }
-          # NOT: bf16 yalnizca V2 ile calisir (eski donusturucu "unsupported ScalarType BFloat16" verir); V2 icin tf-nightly gerekir
-          echo ">>> v2 + bf16 + akitma (en az RAM)"; run --use_v2=True --delete_in_memory_params=True --model_dtype=bfloat16 $EMB || true
-          [ -n "$(found)" ] || { echo ">>> v2 + bf16"; run --use_v2=True --model_dtype=bfloat16 $EMB || true; }
-          [ -n "$(found)" ] || { echo ">>> eski donusturucu fp32"; run $EMB || true; }
-          [ -n "$(found)" ] || { echo ">>> gorsel fp32"; run --task=image_text_to_text || true; }
+          echo ">>> 1) V2 + agirliklar diskten akitilir (en az RAM)"; run 240 --use_v2=True --delete_in_memory_params=True $EMB || true
+          [ -n "$(found)" ] || { echo ">>> 2) V2"; run 100 --use_v2=True $EMB || true; }
           F=$(found); [ -n "$F" ] || { echo "HATA: .litertlm uretilemedi"; exit 1; }
           cp "$F" gemma4-anlord.litertlm
           ls -l gemma4-anlord.litertlm
@@ -74,4 +73,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "model-${{ github.run_number }}" gemma4-anlord.litertlm.part* --repo "${{ github.repository }}" --title "Gemma4 anlord ${{ inputs.recipe }}" --notes "Birlestirmek icin: cat gemma4-anlord.litertlm.part* > gemma4-anlord.litertlm"
+          gh release create "model-${{ github.run_number }}" gemma4-anlord.litertlm.part* --repo "${{ github.repository }}" --title "Gemma4 anlord ${{ inputs.recipe || 'dynamic_wi4_afp32' }}" --notes "Birlestirmek icin: cat gemma4-anlord.litertlm.part* > gemma4-anlord.litertlm"
