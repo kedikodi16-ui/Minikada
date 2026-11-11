@@ -44,7 +44,14 @@ jobs:
       - name: Donustur
         run: |
           mkdir -p out
-          run() { rm -rf out/*; nice -n 10 litert-torch export_hf --model=model --output_dir=out "$@" --quantization_recipe=${{ inputs.recipe }} --cache_length=4096 --bundle_litert_lm=True; }
+          # Bellek siniri: asilirsa runner degil sadece donusum sureci olur
+          if sudo systemd-run --scope -q -p MemoryMax=13G -p MemorySwapMax=18G --uid=$(id -u) --gid=$(id -g) true 2>/dev/null; then
+            LIM="sudo systemd-run --scope -q -p MemoryMax=13G -p MemorySwapMax=18G --uid=$(id -u) --gid=$(id -g) --setenv=PATH=$PATH --setenv=HOME=$HOME --working-directory=$PWD"
+          else
+            LIM=""
+          fi
+          echo "LIM=$LIM"
+          run() { rm -rf out/*; timeout 100m $LIM nice -n 10 litert-torch export_hf --model=model --output_dir=out "$@" --quantization_recipe=${{ inputs.recipe }} --cache_length=4096 --bundle_litert_lm=True 2>&1 | grep --line-buffered -v "is part of .* signature, but not documented"; free -g; dmesg 2>/dev/null | grep -i -E "killed process|out of memory" | tail -3 || true; }
           found() { find out -name '*.litertlm' | head -1; }
           run --use_v2=True --delete_in_memory_params=True || true
           [ -n "$(found)" ] || { echo ">>> bf16"; run --model_dtype=bfloat16 || true; }
