@@ -15,17 +15,23 @@ permissions:
 jobs:
   convert:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 355
     steps:
       - name: Disk ac
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-          df -h /
-      - name: Swap ac (32 GB)
+          # Run #7 disk dolup dustu (per_layer_embedder fp32 ~9 GB) -> daha fazla yer ac
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /usr/local/share/boost \
+            /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/go /opt/hostedtoolcache/node /opt/hostedtoolcache/PyPy /opt/hostedtoolcache/Ruby /opt/hostedtoolcache/Java* \
+            /usr/share/swift /usr/local/share/powershell /usr/local/share/chromium /usr/local/lib/node_modules /opt/az /opt/microsoft /opt/google /opt/pipx /usr/lib/jvm /usr/lib/google-cloud-sdk /usr/lib/firefox || true
+          sudo docker system prune -af >/dev/null 2>&1 || true
+          sudo apt-get clean || true
+          df -h
+      - name: Swap ac (8 GB)
         run: |
+          # RAM sorun degildi (run #7'de swap ~2 GB kullanildi); 32 GB swap diski yiyordu
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile /swapfile /swapfile2
-          sudo fallocate -l 32G /swapfile
+          sudo fallocate -l 8G /swapfile
           sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
           free -g
           df -h /
@@ -37,28 +43,29 @@ jobs:
       # - litert-lm-builder 0.19 TfLiteModelType'i kaldirdi -> 0.18.1'e sabitle
       - name: Paketleri kur
         run: |
-          pip install -q "litert-torch==0.10.0" "tf-nightly==2.23.0.dev20261109" "litert-lm-builder==0.18.1" "litert-lm==0.18.1" "huggingface_hub[cli]"
+          pip install -q --no-cache-dir "litert-torch==0.10.0" "tf-nightly==2.23.0.dev20261109" "litert-lm-builder==0.18.1" "litert-lm==0.18.1" "huggingface_hub[cli]"
           pip list 2>/dev/null | grep -iE "litert|tf-nightly|^torch "
       - name: Modeli indir
         run: |
           python - <<PY
           from huggingface_hub import snapshot_download
-          snapshot_download("${{ inputs.model || 'anlord/gemma-4-E2B-it-abliterated' }}", local_dir="model")
+          snapshot_download("${{ inputs.model || 'anlord/gemma-4-E2B-it-abliterated' }}", local_dir="model", allow_patterns=["*.json","*.jinja","*.safetensors","tokenizer*"])
           PY
           df -h /
       - name: Donustur
         run: |
           mkdir -p out
           # Bellek siniri: asilirsa runner degil sadece donusum sureci olur (swap kullanabilir)
-          LIM="sudo systemd-run --scope -q -p MemoryMax=14G -p MemorySwapMax=32G --uid=$(id -u) --gid=$(id -g) --setenv=PATH=$PATH --setenv=HOME=$HOME --working-directory=$PWD"
+          LIM="sudo systemd-run --scope -q -p MemoryMax=14G -p MemorySwapMax=8G --uid=$(id -u) --gid=$(id -g) --setenv=PATH=$PATH --setenv=HOME=$HOME --working-directory=$PWD"
           $LIM true 2>/dev/null || LIM=""
           echo "LIM=$LIM"
           # Gemma4 icin externalize_embedder ZORUNLU. bf16 KULLANMA (V2'de dtype hatasi, eskisinde desteklenmiyor).
           EMB="--externalize_embedder=True --single_token_embedder=True"
           run() { T=$1; shift; rm -rf out/*; timeout ${T}m $LIM nice -n 10 litert-torch export_hf --model=model --output_dir=out "$@" --quantization_recipe=${{ inputs.recipe || 'dynamic_wi4_afp32' }} --cache_length=4096 --bundle_litert_lm=True 2>&1 | grep --line-buffered -vE "is part of .* signature, but not documented|^\s*$"; echo "exit=${PIPESTATUS[0]}"; free -g; df -h / | tail -1; }
           found() { find out -name '*.litertlm' | head -1; }
-          echo ">>> 1) V2 + agirliklar diskten akitilir (en az RAM)"; run 240 --use_v2=True --delete_in_memory_params=True $EMB || true
-          [ -n "$(found)" ] || { echo ">>> 2) V2"; run 100 --use_v2=True $EMB || true; }
+          # Disk izleme (log icin)
+          ( while true; do sleep 300; echo "[disk] $(df -h / | tail -1 | awk '{print $3" kullanilan, "$4" bos"}') [ram] $(free -g | awk '/Mem/{print $3"G"}') [swap] $(free -g | awk '/Swap/{print $3"G"}')"; done ) &
+          echo ">>> V2 + agirliklar diskten akitilir"; run 330 --use_v2=True --delete_in_memory_params=True $EMB || true
           F=$(found); [ -n "$F" ] || { echo "HATA: .litertlm uretilemedi"; exit 1; }
           cp "$F" gemma4-anlord.litertlm
           ls -l gemma4-anlord.litertlm
