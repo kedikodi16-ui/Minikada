@@ -26,12 +26,13 @@ jobs:
           sudo docker system prune -af >/dev/null 2>&1 || true
           sudo apt-get clean || true
           df -h
-      - name: Swap ac (8 GB)
+      - name: Swap ac (32 GB)
         run: |
-          # RAM sorun degildi (run #7'de swap ~2 GB kullanildi); 32 GB swap diski yiyordu
+          # Metin modelinin MLIR asamasi ~25+ GB bellek ister (run #8: 14G RAM + 8G swap yetmedi, run #7: 32G swap ile gecti).
+          # Bu swap, per_layer_embedder asamasina gelince otomatik silinip disk acilir (Donustur adimina bak).
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile /swapfile /swapfile2
-          sudo fallocate -l 8G /swapfile
+          sudo fallocate -l 32G /swapfile
           sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
           free -g
           df -h /
@@ -56,15 +57,19 @@ jobs:
         run: |
           mkdir -p out
           # Bellek siniri: asilirsa runner degil sadece donusum sureci olur (swap kullanabilir)
-          LIM="sudo systemd-run --scope -q -p MemoryMax=14G -p MemorySwapMax=8G --uid=$(id -u) --gid=$(id -g) --setenv=PATH=$PATH --setenv=HOME=$HOME --working-directory=$PWD"
+          LIM="sudo systemd-run --scope -q -p MemoryMax=14G -p MemorySwapMax=40G --uid=$(id -u) --gid=$(id -g) --setenv=PATH=$PATH --setenv=HOME=$HOME --working-directory=$PWD"
           $LIM true 2>/dev/null || LIM=""
           echo "LIM=$LIM"
           # Gemma4 icin externalize_embedder ZORUNLU. bf16 KULLANMA (V2'de dtype hatasi, eskisinde desteklenmiyor).
           EMB="--externalize_embedder=True --single_token_embedder=True"
-          run() { T=$1; shift; rm -rf out/*; timeout ${T}m $LIM nice -n 10 litert-torch export_hf --model=model --output_dir=out "$@" --quantization_recipe=${{ inputs.recipe || 'dynamic_wi4_afp32' }} --cache_length=4096 --bundle_litert_lm=True 2>&1 | grep --line-buffered -vE "is part of .* signature, but not documented|^\s*$"; echo "exit=${PIPESTATUS[0]}"; free -g; df -h / | tail -1; }
+          run() { T=$1; shift; rm -rf out/*; timeout ${T}m $LIM nice -n 10 litert-torch export_hf --model=model --output_dir=out "$@" --quantization_recipe=${{ inputs.recipe || 'dynamic_wi4_afp32' }} --cache_length=4096 --bundle_litert_lm=True 2>&1 | grep --line-buffered -vE "is part of .* signature, but not documented|^\s*$" | tee -a conv.log; echo "exit=${PIPESTATUS[0]}"; free -g; df -h / | tail -1; }
           found() { find out -name '*.litertlm' | head -1; }
           # Disk izleme (log icin)
           ( while true; do sleep 300; echo "[disk] $(df -h / | tail -1 | awk '{print $3" kullanilan, "$4" bos"}') [ram] $(free -g | awk '/Mem/{print $3"G"}') [swap] $(free -g | awk '/Swap/{print $3"G"}')"; done ) &
+          # Metin modeli bitince (run #7'de disk per_layer_embedder'da doldu) swap'i kapatip 32 GB disk ac
+          ( until grep -q "Export per_layer_embedder model" conv.log 2>/dev/null; do sleep 20; done; sleep 30
+            echo "[swap] per_layer_embedder basladi, swap kapatiliyor"; free -g
+            sudo swapoff /swapfile && sudo rm -f /swapfile && echo "[swap] kapatildi, disk: $(df -h / | tail -1)" || echo "[swap] kapatilamadi, devam" ) &
           echo ">>> V2 + agirliklar diskten akitilir"; run 330 --use_v2=True --delete_in_memory_params=True $EMB || true
           F=$(found); [ -n "$F" ] || { echo "HATA: .litertlm uretilemedi"; exit 1; }
           cp "$F" gemma4-anlord.litertlm
